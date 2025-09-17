@@ -102,7 +102,7 @@ def estimate_height_metrics(helmet_px: float, hook_px: float, params: CameraPara
 
     hook_height_m = max(params.camera_height_m - hook_distance_m, 0.0)
     helmet_height_m = max(params.camera_height_m - helmet_distance_m, 0.0)
-    relative_height_m = hook_height_m - helmet_height_m
+    relative_height_m = helmet_distance_m - hook_distance_m
 
     return HeightEstimationResult(
         hook_distance_m=hook_distance_m,
@@ -260,9 +260,9 @@ def run(
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
         max_det=1000,  # maximum detections per image
-        crane_ratio_thres=4.2, # crane ratio threshold
-        crane_width_queue_args = [10,2],
-        helmet_width_queue_args = [10,2],
+        height_diff_thres=4.2, # height difference threshold
+        crane_height_queue_args = [10,2],
+        helmet_height_queue_args = [10,2],
         helmet_detect_queue_args = [10,1],
         focal_length_mm=4.0,
         pixel_size_mm=0.00112,
@@ -341,13 +341,13 @@ def run(
     )
 
     # initialize queues
-    helmet_width_queue = Queue()
-    crane_width_queue = Queue()
+    helmet_height_queue = Queue()
+    crane_height_queue = Queue()
     helmet_detect_queue = Queue()
 
     # initialize queue parameters
-    h_k, h_m = helmet_width_queue_args
-    c_k, c_m = crane_width_queue_args
+    h_k, h_m = helmet_height_queue_args
+    c_k, c_m = crane_height_queue_args
 
     hd_k, hd_m = helmet_detect_queue_args
 
@@ -412,11 +412,11 @@ def run(
                         1, (255, 255, 255), 2, cv2.LINE_AA)
                 
             # Dequeue queues if k limit is reached
-            if crane_width_queue.size() == c_k and crane_width_queue.size() != 0:
-                crane_width_queue.dequeue()
-            
-            if helmet_width_queue.size() == h_k and helmet_width_queue.size() != 0:
-                helmet_width_queue.dequeue()
+            if crane_height_queue.size() == c_k and crane_height_queue.size() != 0:
+                crane_height_queue.dequeue()
+
+            if helmet_height_queue.size() == h_k and helmet_height_queue.size() != 0:
+                helmet_height_queue.dequeue()
             
             if helmet_detect_queue.size() == hd_k and helmet_detect_queue.size() != 0:
                 helmet_detect_queue.dequeue()
@@ -435,7 +435,7 @@ def run(
 
                 warning = 0
                 zoom_warning = 0
-                crane_ratio = 0.0
+                height_difference_m = 0.0
                 hook_distance_m = 0.0
                 helmet_distance_m = 0.0
                 relative_height_m = 0.0
@@ -488,33 +488,33 @@ def run(
                     if save_crop:
                         save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
                 
-                # Add helmet and crane sizes to queues if exists
+                # Add helmet and crane heights to queues if exists
                 if det_dict[3]: # crane entry
                     det_dict[3] = sorted(det_dict[3], key=lambda x: x[3])[::-1] # sort crane hooks by highest conf level
                     crane = det_dict[3][0]
-                    crane_width_queue.enqueue(crane[6])
+                    crane_height_queue.enqueue(crane[7])
                 else:
-                    crane_width_queue.enqueue(0)
+                    crane_height_queue.enqueue(0)
 
                 helmets = det_dict[1] + det_dict[4] # combine helmets detections
-                
+
 
                 if helmets: # check for helmet detections
-                    helmets = sorted(helmets, key=lambda x: max(x[6],x[7]))[::-1] # sort helmets by max(helmet_width, helmet_height)
-                    helmet_width_queue.enqueue(max(helmets[0][6],helmets[0][7]))
+                    helmets = sorted(helmets, key=lambda x: x[7], reverse=True) # sort helmets by height
+                    helmet_height_queue.enqueue(helmets[0][7])
                     helmet_detect_queue.enqueue({'helmet': det_dict[1], 'cross': det_dict[4]}) # add detections to queue
                 else:
-                    helmet_width_queue.enqueue(0)
+                    helmet_height_queue.enqueue(0)
                     helmet_detect_queue.enqueue({}) # add detections to queue
-                
-                # Calculated averages sizes
-                avg_crane = calc_queue_avg(crane_width_queue.items, c_m)
-                avg_helmet = calc_queue_avg(helmet_width_queue.items, h_m)
+
+                # Calculated average heights
+                avg_crane_height = calc_queue_avg(crane_height_queue.items, c_m)
+                avg_helmet_height = calc_queue_avg(helmet_height_queue.items, h_m)
 
                 # Determine zoom warning
-                if avg_helmet > 0 and avg_helmet <= min_zoom_level:
+                if avg_helmet_height > 0 and avg_helmet_height <= min_zoom_level:
                     zoom_warning = 1
-                elif avg_helmet >= max_zoom_level:
+                elif avg_helmet_height >= max_zoom_level:
                     zoom_warning = 2
                 else:
                     zoom_warning = 0
@@ -531,17 +531,17 @@ def run(
                 latest_helmet = None
                 reference_detection = None
 
-                if avg_crane > 0 and avg_helmet > 0:  # check both crane and helmet values exist
+                if avg_crane_height > 0 and avg_helmet_height > 0:  # check both crane and helmet values exist
 
-                    height_result = estimate_height_metrics(avg_helmet, avg_crane, camera_params)
+                    height_result = estimate_height_metrics(avg_helmet_height, avg_crane_height, camera_params)
 
                     if height_result:
-                        crane_ratio = height_result.hook_height_m
                         relative_height_m = height_result.relative_height_m
+                        height_difference_m = abs(relative_height_m)
                         hook_distance_m = height_result.hook_distance_m
                         helmet_distance_m = height_result.helmet_distance_m
                     else:
-                        crane_ratio = 0.0
+                        height_difference_m = 0.0
                         relative_height_m = 0.0
                         hook_distance_m = 0.0
                         helmet_distance_m = 0.0
@@ -562,8 +562,8 @@ def run(
                         if horizontal_distance is not None:
                             relative_horizontal_m = horizontal_distance
 
-                    # Calculate warnings
-                    if 0 < crane_ratio and crane_ratio < crane_ratio_thres:  # if low height
+                    # Calculate warnings based on height difference threshold
+                    if height_difference_m > height_diff_thres:
 
                         list_cross_helmets = [a_dict['cross'] for a_dict in helmet_detect_queue.items if a_dict]
                         cross_helmet_bool = any(list_cross_helmets)  # check if any cross_helmets in queue
@@ -576,21 +576,27 @@ def run(
                         ):  # if no cross helmet in image while normal helmet in image
                             warning = 2
 
-                    elif crane_ratio > crane_ratio_thres:
-                        # make buffer
-                        crane_buf = Point(int(crane[4]), int(crane[5])).buffer(10 * avg_helmet)
+                        if warning < 2 and bool(helmet_detect) and latest_helmet:
+                            # make buffer
+                            crane_buf = Point(int(crane[4]), int(crane[5])).buffer(10 * avg_helmet_height)
 
-                        # draw buffer red
-                        cv2.circle(im0, (int(crane[4]), int(crane[5])), (10 * avg_helmet), (0, 0, 255), 2)
+                            # draw buffer red
+                            cv2.circle(
+                                im0,
+                                (int(crane[4]), int(crane[5])),
+                                (10 * avg_helmet_height),
+                                (0, 0, 255),
+                                2,
+                            )
 
-                        if bool(helmet_detect) and latest_helmet:
                             for helmet in latest_helmet.get('helmet', []) + latest_helmet.get('cross', []):  # helmet detections
                                 if crane_buf.contains(Point(helmet[4], helmet[5])):  # if any helmet in buffer
                                     warning = 1
+                                    break
                     else:
                         warning = 0
                 else:
-                    crane_ratio = 0.0
+                    height_difference_m = 0.0
                     relative_height_m = 0.0
                     hook_distance_m = 0.0
                     helmet_distance_m = 0.0
@@ -598,22 +604,22 @@ def run(
                 # Write vars to crane entry
                 if det_dict[3]: # only write analysis vars if crane exists
 
-                    # Helmet/Crane ratio
-                    det_dict[3][0][8] = crane_ratio
+                    # Height difference between hook and helmet
+                    det_dict[3][0][8] = height_difference_m
 
                     # Warnings
                     det_dict[3][0][9] = warning
 
-                    # Object size lists
-                    det_dict[3][0][10] = crane_width_queue.items
-                    det_dict[3][0][11] = helmet_width_queue.items
+                    # Object height lists
+                    det_dict[3][0][10] = crane_height_queue.items
+                    det_dict[3][0][11] = helmet_height_queue.items
 
                     # Object detection lists
                     det_dict[3][0][12] = helmet_detect_binary
 
-                    # Avg values
-                    det_dict[3][0][13] = avg_crane
-                    det_dict[3][0][14] = avg_helmet
+                    # Avg height values
+                    det_dict[3][0][13] = avg_crane_height
+                    det_dict[3][0][14] = avg_helmet_height
                     det_dict[3][0][15] = helmet_detect
                     det_dict[3][0][16] = hook_distance_m
                     det_dict[3][0][17] = helmet_distance_m
@@ -632,13 +638,13 @@ def run(
                             'y_local',
                             'box_width',
                             'box_height',
-                            'hook_height_m',
+                            'height_difference_m',
                             'crane_warning',
-                            'crane_size_list',
-                            'helmet_size_list',
+                            'crane_height_list',
+                            'helmet_height_list',
                             'helmet_detect_list',
-                            'avg_crane_width',
-                            'avg_helmet_width',
+                            'avg_crane_height',
+                            'avg_helmet_height',
                             'helmet_detect',
                             'hook_distance_m',
                             'helmet_distance_m',
@@ -662,8 +668,8 @@ def run(
                 im0 = display_zoom_warning(im0, zoom_warning)
 
             else: # if no detections add 0 to all lists
-                crane_width_queue.enqueue(0)
-                helmet_width_queue.enqueue(0)
+                crane_height_queue.enqueue(0)
+                helmet_height_queue.enqueue(0)
                 helmet_detect_queue.enqueue({})
 
             # Stream results
@@ -714,9 +720,9 @@ def parse_opt():
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
-    parser.add_argument('--crane-ratio-thres', type=float, default=4.2, help='hook height threshold (meters)')
-    parser.add_argument('--crane-width-queue-args', nargs='+', type=int, default=[10,2], help='crane queue arguments')
-    parser.add_argument('--helmet-width-queue-args', nargs='+', type=int, default=[10,2], help='helmet queue arguments')
+    parser.add_argument('--height-diff-thres', type=float, default=4.2, help='height difference threshold (meters)')
+    parser.add_argument('--crane-height-queue-args', nargs='+', type=int, default=[10,2], help='crane queue arguments')
+    parser.add_argument('--helmet-height-queue-args', nargs='+', type=int, default=[10,2], help='helmet queue arguments')
     parser.add_argument('--helmet-detect-queue-args', nargs='+', type=int, default=[10,1], help='helmet detect queue arguments')
     parser.add_argument('--focal-length-mm', type=float, default=4.0, help='camera focal length in millimeters')
     parser.add_argument('--pixel-size-mm', type=float, default=0.00112, help='sensor pixel size in millimeters per pixel')
