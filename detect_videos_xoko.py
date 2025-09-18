@@ -261,8 +261,8 @@ def run(
         iou_thres=0.45,  # NMS IOU threshold
         max_det=1000,  # maximum detections per image
         height_diff_thres=4.2, # height difference threshold
-        crane_height_queue_args = [10,2],
-        helmet_height_queue_args = [10,2],
+        crane_width_queue_args = [10,2],
+        helmet_width_queue_args = [10,2],
         helmet_detect_queue_args = [10,1],
         focal_length_mm=4.0,
         pixel_size_mm=0.00112,
@@ -346,8 +346,8 @@ def run(
     helmet_detect_queue = Queue()
 
     # initialize queue parameters
-    h_k, h_m = helmet_height_queue_args
-    c_k, c_m = crane_height_queue_args
+    h_k, h_m = helmet_width_queue_args
+    c_k, c_m = crane_width_queue_args
 
     hd_k, hd_m = helmet_detect_queue_args
 
@@ -721,8 +721,8 @@ def parse_opt():
     parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
     parser.add_argument('--height-diff-thres', type=float, default=4.2, help='height difference threshold (meters)')
-    parser.add_argument('--crane-height-queue-args', nargs='+', type=int, default=[10,2], help='crane queue arguments')
-    parser.add_argument('--helmet-height-queue-args', nargs='+', type=int, default=[10,2], help='helmet queue arguments')
+    parser.add_argument('--crane-width-queue-args', nargs='+', type=int, default=[10,2], help='crane queue arguments')
+    parser.add_argument('--helmet-width-queue-args', nargs='+', type=int, default=[10,2], help='helmet queue arguments')
     parser.add_argument('--helmet-detect-queue-args', nargs='+', type=int, default=[10,1], help='helmet detect queue arguments')
     parser.add_argument('--focal-length-mm', type=float, default=4.0, help='camera focal length in millimeters')
     parser.add_argument('--pixel-size-mm', type=float, default=0.00112, help='sensor pixel size in millimeters per pixel')
