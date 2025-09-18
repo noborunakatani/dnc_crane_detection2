@@ -435,6 +435,7 @@ def run(
 
                 warning = 0
                 zoom_warning = 0
+                crane_ratio = 0.0
                 height_difference_m = 0.0
                 hook_distance_m = 0.0
                 helmet_distance_m = 0.0
@@ -464,6 +465,7 @@ def run(
                         '',
                         '',
                         '',
+                        0.0,
                         0.0,
                         0.0,
                         0.0,
@@ -536,11 +538,13 @@ def run(
                     height_result = estimate_height_metrics(avg_helmet_height, avg_crane_height, camera_params)
 
                     if height_result:
+                        crane_ratio = avg_crane_height / avg_helmet_height if avg_helmet_height > 0 else 0.0
                         relative_height_m = height_result.relative_height_m
                         height_difference_m = abs(relative_height_m)
                         hook_distance_m = height_result.hook_distance_m
                         helmet_distance_m = height_result.helmet_distance_m
                     else:
+                        crane_ratio = 0.0
                         height_difference_m = 0.0
                         relative_height_m = 0.0
                         hook_distance_m = 0.0
@@ -596,6 +600,7 @@ def run(
                     else:
                         warning = 0
                 else:
+                    crane_ratio = 0.0
                     height_difference_m = 0.0
                     relative_height_m = 0.0
                     hook_distance_m = 0.0
@@ -604,27 +609,28 @@ def run(
                 # Write vars to crane entry
                 if det_dict[3]: # only write analysis vars if crane exists
 
-                    # Height difference between hook and helmet
-                    det_dict[3][0][8] = height_difference_m
+                    # Crane/helmet ratio (legacy log column)
+                    det_dict[3][0][8] = crane_ratio
 
                     # Warnings
                     det_dict[3][0][9] = warning
 
-                    # Object height lists
+                    # Object size lists
                     det_dict[3][0][10] = crane_height_queue.items
                     det_dict[3][0][11] = helmet_height_queue.items
 
                     # Object detection lists
                     det_dict[3][0][12] = helmet_detect_binary
 
-                    # Avg height values
+                    # Avg size values
                     det_dict[3][0][13] = avg_crane_height
                     det_dict[3][0][14] = avg_helmet_height
                     det_dict[3][0][15] = helmet_detect
-                    det_dict[3][0][16] = hook_distance_m
-                    det_dict[3][0][17] = helmet_distance_m
-                    det_dict[3][0][18] = relative_height_m
-                    det_dict[3][0][19] = relative_horizontal_m
+                    det_dict[3][0][16] = height_difference_m
+                    det_dict[3][0][17] = hook_distance_m
+                    det_dict[3][0][18] = helmet_distance_m
+                    det_dict[3][0][19] = relative_height_m
+                    det_dict[3][0][20] = relative_horizontal_m
 
                 if save_csv: # Write to CSV
                     # write the header if not exists
@@ -638,14 +644,15 @@ def run(
                             'y_local',
                             'box_width',
                             'box_height',
-                            'height_difference_m',
+                            'crane_helmet_ratio',
                             'crane_warning',
-                            'crane_height_list',
-                            'helmet_height_list',
+                            'crane_size_list',
+                            'helmet_size_list',
                             'helmet_detect_list',
-                            'avg_crane_height',
-                            'avg_helmet_height',
+                            'avg_crane_width',
+                            'avg_helmet_width',
                             'helmet_detect',
+                            'height_difference_m',
                             'hook_distance_m',
                             'helmet_distance_m',
                             'relative_height_m',
