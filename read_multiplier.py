@@ -271,36 +271,38 @@ def re_match(pattern: str, text: str) -> bool:
     return re.fullmatch(pattern, text) is not None
 
 
-    def annotate_frame(
-        frame: np.ndarray,
-        roi: ROI,
-        digit_roi: ROI,
-        value: str,
-        confidence: float,
-        output_path: Path,
-    ) -> None:
-        annotated = frame.copy()
-        cv2.rectangle(annotated, (roi.x, roi.y), (roi.x + roi.w, roi.y + roi.h), (0, 255, 255), 2)
-        cv2.rectangle(
-            annotated,
-            (digit_roi.x, digit_roi.y),
-            (digit_roi.x + digit_roi.w, digit_roi.y + digit_roi.h),
-            (0, 165, 255),
-            2,
-        )
-        shown_value = value if value else "未検出"
-        label = f"値:{shown_value} / 信頼度:{confidence:.2f}"
-        text_pos = (digit_roi.x, max(0, digit_roi.y - 5))
-        cv2.putText(
-            annotated,
-            label,
-            text_pos,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA,
-        )
+def annotate_frame(
+    frame: np.ndarray,
+    roi: ROI,
+    digit_roi: ROI,
+    value: str,
+    confidence: float,
+    output_path: Path,
+) -> None:
+    """Save an annotated frame showing ROI, digit band, and OCR result."""
+
+    annotated = frame.copy()
+    cv2.rectangle(annotated, (roi.x, roi.y), (roi.x + roi.w, roi.y + roi.h), (0, 255, 255), 2)
+    cv2.rectangle(
+        annotated,
+        (digit_roi.x, digit_roi.y),
+        (digit_roi.x + digit_roi.w, digit_roi.y + digit_roi.h),
+        (0, 165, 255),
+        2,
+    )
+    shown_value = value if value else "未検出"
+    label = f"値:{shown_value} / 信頼度:{confidence:.2f}"
+    text_pos = (digit_roi.x, max(0, digit_roi.y - 5))
+    cv2.putText(
+        annotated,
+        label,
+        text_pos,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 0, 255),
+        2,
+        cv2.LINE_AA,
+    )
     cv2.imwrite(str(output_path), annotated)
 
 
