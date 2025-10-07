@@ -243,6 +243,188 @@ def preprocess_for_ocr(
     return processed
 
 
+def build_digit_mask(
+    image: np.ndarray,
+    clahe_clip: float = 2.0,
+    clahe_grid: Tuple[int, int] = (8, 8),
+    adaptive: bool = False,
+    color_hint: Optional[Tuple[int, int, int]] = None,
+    color_tolerance: int = 30,
+) -> np.ndarray:
+    """Create a binary mask emphasizing the digit strokes."""
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    clahe = cv2.createCLAHE(clipLimit=max(1.0, clahe_clip), tileGridSize=clahe_grid)
+    enhanced = clahe.apply(gray)
+    blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
+
+    if adaptive:
+        binary = cv2.adaptiveThreshold(
+            blurred,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            15,
+            2,
+        )
+    else:
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    if color_hint is not None:
+        target = np.array(color_hint, dtype=np.int16)
+        diff = np.abs(image.astype(np.int16) - target)
+        channel_diff = diff.max(axis=2)
+        mask = (channel_diff <= max(1, color_tolerance)).astype(np.uint8) * 255
+        binary = cv2.bitwise_and(binary, mask)
+
+    white_ratio = float(cv2.countNonZero(binary)) / float(binary.size or 1)
+    if white_ratio < 0.1:
+        binary = cv2.bitwise_not(binary)
+
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+    return binary
+
+
+def _active_span(values: np.ndarray, min_len: int, threshold: float) -> Optional[Tuple[int, int]]:
+    active_idx = np.where(values >= threshold)[0]
+    if active_idx.size == 0:
+        return None
+    start = int(active_idx[0])
+    end = int(active_idx[-1])
+    if end - start + 1 < min_len:
+        return None
+    return start, end
+
+
+def refine_digit_roi(
+    frame: np.ndarray,
+    digit_roi: ROI,
+    clahe_clip: float,
+    clahe_grid: Tuple[int, int],
+    adaptive: bool,
+    color_hint: Optional[Tuple[int, int, int]],
+    color_tolerance: int,
+    min_band_px: int = 8,
+) -> Tuple[ROI, np.ndarray]:
+    """Tighten the digit ROI to active columns/rows and return its mask."""
+
+    h, w = frame.shape[:2]
+    digit_roi = digit_roi.clamp(w, h)
+    crop = frame[digit_roi.y : digit_roi.y + digit_roi.h, digit_roi.x : digit_roi.x + digit_roi.w]
+    if crop.size == 0:
+        return digit_roi, np.zeros((1, 1), dtype=np.uint8)
+
+    mask = build_digit_mask(
+        crop,
+        clahe_clip=clahe_clip,
+        clahe_grid=clahe_grid,
+        adaptive=adaptive,
+        color_hint=color_hint,
+        color_tolerance=color_tolerance,
+    )
+
+    cols = mask.sum(axis=0) / 255.0
+    rows = mask.sum(axis=1) / 255.0
+    col_threshold = max(1.0, 0.12 * mask.shape[0])
+    row_threshold = max(1.0, 0.10 * mask.shape[1])
+
+    col_span = _active_span(cols, min_band_px, col_threshold)
+    row_span = _active_span(rows, max(3, int(0.5 * mask.shape[0])), row_threshold)
+
+    if col_span:
+        start_x, end_x = col_span
+        start_x = max(0, start_x - 1)
+        end_x = min(mask.shape[1] - 1, end_x + 1)
+        digit_roi = ROI(digit_roi.x + start_x, digit_roi.y, end_x - start_x + 1, digit_roi.h)
+        mask = mask[:, start_x : end_x + 1]
+    if row_span:
+        start_y, end_y = row_span
+        start_y = max(0, start_y - 1)
+        end_y = min(mask.shape[0] - 1, end_y + 1)
+        digit_roi = ROI(digit_roi.x, digit_roi.y + start_y, digit_roi.w, end_y - start_y + 1)
+        mask = mask[start_y : end_y + 1, :]
+
+    return digit_roi.clamp(w, h), mask
+
+
+def split_digit_segments(mask: np.ndarray, expected: int) -> List[np.ndarray]:
+    if mask.size == 0:
+        return []
+    cols = mask.sum(axis=0) / 255.0
+    gap_threshold = max(1.0, 0.05 * mask.shape[0])
+    segments: List[Tuple[int, int]] = []
+    start = 0
+    for idx in range(mask.shape[1]):
+        if cols[idx] <= gap_threshold:
+            if idx - start >= 3:
+                segments.append((start, idx - 1))
+            start = idx + 1
+    if mask.shape[1] - start >= 3:
+        segments.append((start, mask.shape[1] - 1))
+
+    if not segments and expected > 0:
+        width = mask.shape[1]
+        chunk = max(1, width // expected)
+        segments = [(i * chunk, min(width - 1, (i + 1) * chunk - 1)) for i in range(expected)]
+
+    if expected and len(segments) != expected:
+        if len(segments) > expected:
+            segments = segments[:expected]
+        else:
+            while len(segments) < expected:
+                last = segments[-1] if segments else (0, mask.shape[1] - 1)
+                segments.append(last)
+
+    extracted: List[np.ndarray] = []
+    for start_col, end_col in segments:
+        extracted.append(mask[:, start_col : end_col + 1])
+    return extracted
+
+
+def count_holes(mask: np.ndarray) -> int:
+    if mask.size == 0:
+        return 0
+    inverted = cv2.bitwise_not(mask)
+    num_labels, labels = cv2.connectedComponents(inverted)
+    hole_labels: List[int] = []
+    h, w = mask.shape
+    for label in range(1, num_labels):
+        component = labels == label
+        if not component.any():
+            continue
+        touches_border = (
+            component[0, :].any()
+            or component[-1, :].any()
+            or component[:, 0].any()
+            or component[:, -1].any()
+        )
+        if not touches_border:
+            hole_labels.append(label)
+    return len(hole_labels)
+
+
+def disambiguate_three_eight(value: str, mask: np.ndarray) -> str:
+    if not value or not value.isdigit():
+        return value
+    segments = split_digit_segments(mask, len(value)) if mask.size else []
+    if not segments:
+        return value
+    chars = list(value)
+    for idx, segment_mask in enumerate(segments):
+        if idx >= len(chars):
+            break
+        char = chars[idx]
+        if char not in {"3", "8"}:
+            continue
+        holes = count_holes(segment_mask)
+        if char == "3" and holes >= 2:
+            chars[idx] = "8"
+        elif char == "8" and holes == 0:
+            chars[idx] = "3"
+    return "".join(chars)
+
+
 def extract_numeric_candidate(recognitions: Sequence[Tuple[str, float]], whitelist_regex: str = r"^[0-9]{1,2}$") -> Tuple[str, float]:
     """Pick the best numeric candidate from OCR outputs."""
 
@@ -435,8 +617,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-threshold", action="store_true", help="Use adaptive threshold instead of Otsu")
     parser.add_argument("--digit-regex", type=str, default=r"^[0-9]{1,2}$", help="Regex to validate OCR outputs")
     parser.add_argument("--clahe-clip", type=float, default=2.0, help="CLAHE clip limit")
+    parser.add_argument(
+        "--clahe-grid",
+        nargs=2,
+        type=int,
+        default=(8, 8),
+        metavar=("GRID_W", "GRID_H"),
+        help="CLAHE grid size (tile width and height)",
+    )
     parser.add_argument("--scale", type=float, default=2.5, help="Scale factor prior to OCR")
     parser.add_argument("--summary", action="store_true", help="Print extended summary at end")
+    parser.add_argument(
+        "--digit-color",
+        nargs=3,
+        type=int,
+        metavar=("B", "G", "R"),
+        help="Optional BGR color hint for digits (improves masking when digits have fixed color)",
+    )
+    parser.add_argument(
+        "--color-tolerance",
+        type=int,
+        default=35,
+        help="Tolerance for color-based masking when --digit-color is set",
+    )
     return parser.parse_args()
 
 
@@ -527,6 +730,8 @@ def main() -> None:
     all_records: List[FrameRecord] = []
     smoother = ValueSmoother(window_size=args.smooth_window)
     calibrated_roi: Optional[ROI] = manual_roi
+    clahe_grid = tuple(int(v) for v in args.clahe_grid)
+    digit_color = tuple(int(v) for v in args.digit_color) if args.digit_color else None
 
     if frames_dir:
         frame_paths = sorted(
@@ -590,7 +795,7 @@ def main() -> None:
                             roi.x : roi.x + cross_band_width,
                         ].copy()
 
-            digit_roi = compute_digit_roi(
+            digit_roi_base = compute_digit_roi(
                 roi,
                 width,
                 height,
@@ -598,16 +803,27 @@ def main() -> None:
                 args.digit_band_end,
                 min_start=args.cross_band,
             )
+            digit_roi, digit_mask = refine_digit_roi(
+                frame,
+                digit_roi_base,
+                clahe_clip=args.clahe_clip,
+                clahe_grid=clahe_grid,
+                adaptive=args.adaptive_threshold,
+                color_hint=digit_color,
+                color_tolerance=args.color_tolerance,
+            )
             digit_crop = frame[digit_roi.y : digit_roi.y + digit_roi.h, digit_roi.x : digit_roi.x + digit_roi.w]
             processed = preprocess_for_ocr(
                 digit_crop,
                 scale_factor=args.scale,
                 clahe_clip=args.clahe_clip,
+                clahe_grid=clahe_grid,
                 adaptive=args.adaptive_threshold,
             )
             ocr_ready = processed if ocr_engine.name == "tesseract" else cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
             recognitions = ocr_engine.recognize(ocr_ready)
             value_raw, conf = extract_numeric_candidate(recognitions, whitelist_regex=args.digit_regex)
+            value_raw = disambiguate_three_eight(value_raw, digit_mask)
             value = smoother.update(value_raw)
 
             image_name = f"frame_{frame_index:06d}.png"
@@ -708,7 +924,7 @@ def main() -> None:
                                 roi.x : roi.x + cross_band_width,
                             ].copy()
 
-            digit_roi = compute_digit_roi(
+            digit_roi_base = compute_digit_roi(
                 roi,
                 width,
                 height,
@@ -716,16 +932,27 @@ def main() -> None:
                 args.digit_band_end,
                 min_start=args.cross_band,
             )
+            digit_roi, digit_mask = refine_digit_roi(
+                frame,
+                digit_roi_base,
+                clahe_clip=args.clahe_clip,
+                clahe_grid=clahe_grid,
+                adaptive=args.adaptive_threshold,
+                color_hint=digit_color,
+                color_tolerance=args.color_tolerance,
+            )
             digit_crop = frame[digit_roi.y : digit_roi.y + digit_roi.h, digit_roi.x : digit_roi.x + digit_roi.w]
             processed = preprocess_for_ocr(
                 digit_crop,
                 scale_factor=args.scale,
                 clahe_clip=args.clahe_clip,
+                clahe_grid=clahe_grid,
                 adaptive=args.adaptive_threshold,
             )
             ocr_ready = processed if ocr_engine.name == "tesseract" else cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
             recognitions = ocr_engine.recognize(ocr_ready)
             value_raw, conf = extract_numeric_candidate(recognitions, whitelist_regex=args.digit_regex)
+            value_raw = disambiguate_three_eight(value_raw, digit_mask)
             value = smoother.update(value_raw)
 
             image_name = f"frame_{frame_idx:06d}.png"
